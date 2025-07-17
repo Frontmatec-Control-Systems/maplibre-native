@@ -12,6 +12,8 @@
 #include <cstring>
 #include <mutex>
 #include <vector>
+#include <string>
+#include <chrono>
 
 // Platform-specific export macro
 #ifdef _WIN32
@@ -20,18 +22,24 @@
     #define MAPLIBRE_EXPORT __attribute__((visibility("default")))
 #endif
 
-// Renderer handle structure
+// Configuration constants
+static const int CACHE_TIMEOUT_SECONDS = 20;
+
+// Renderer handle with timeout-based caching
 struct RendererHandle {
     std::unique_ptr<mbgl::util::RunLoop> runloop;
     std::unique_ptr<mbgl::HeadlessFrontend> frontend;
     std::unique_ptr<mbgl::Map> map;
+    std::string styleJson;
     std::vector<uint8_t> lastRenderedPng;
     uint32_t width;
     uint32_t height;
     double pixelRatio;
     bool isValid;
+    std::chrono::steady_clock::time_point lastUsed;
     
-    RendererHandle() : width(0), height(0), pixelRatio(1.0), isValid(false) {}
+    RendererHandle() : width(0), height(0), pixelRatio(1.0), isValid(false), 
+                       lastUsed(std::chrono::steady_clock::now()) {}
 };
 
 extern "C" {
@@ -47,51 +55,17 @@ MAPLIBRE_EXPORT RendererHandle* maplibre_create_renderer(
     }
     
     try {
-        using namespace mbgl;
-        
         auto handle = std::make_unique<RendererHandle>();
-
-        // Create run loop 
-        handle->runloop = std::make_unique<mbgl::util::RunLoop>();
         
-        // Create renderer handle
+        // Store parameters
+        handle->styleJson = style_json;
         handle->width = static_cast<uint32_t>(width);
         handle->height = static_cast<uint32_t>(height);
         handle->pixelRatio = pixel_ratio;
-        
-        // Create frontend
-        handle->frontend = std::make_unique<HeadlessFrontend>(
-            Size{handle->width, handle->height}, 
-            static_cast<float>(pixel_ratio)
-        );
-        
-        // Configure MapTiler
-        auto mapTilerConfiguration = TileServerOptions::MapTilerConfiguration();
-        
-        // Create map
-        handle->map = std::make_unique<Map>(
-            *handle->frontend,
-            MapObserver::nullObserver(),
-            MapOptions()
-                .withMapMode(MapMode::Static)
-                .withSize(handle->frontend->getSize())
-                .withPixelRatio(static_cast<float>(pixel_ratio)),
-            ResourceOptions()
-                //.withCachePath(cache_file ? cache_file : "cache.sqlite")
-                //.withAssetPath(asset_root ? asset_root : ".")
-                //.withApiKey(api_key ? api_key : "")
-                .withTileServerOptions(mapTilerConfiguration)
-        );
-        
-        // Load style
-        // std::string style(style_path);
-        // if (style.find("://") == std::string::npos) {
-        //     style = std::string("file://") + style;
-        // }
-        // handle->map->getStyle().loadURL(style);
-        handle->map->getStyle().loadJSON(style_json);
-
         handle->isValid = true;
+        
+        // No MapLibre objects created yet - will be created on first render
+        
         return handle.release();
         
     } catch (const std::exception& e) {
@@ -111,16 +85,64 @@ MAPLIBRE_EXPORT bool maplibre_render_png(
     double bearing,
     double pitch) {
     
-    if (!handle || !handle->isValid || !handle->map || !handle->frontend) {
+    if (!handle || !handle->isValid) {
         return false;
     }
     
     try {
         using namespace mbgl;
-     
+        
         // Clear previous result
         handle->lastRenderedPng.clear();
-
+        
+        auto now = std::chrono::steady_clock::now();
+        
+        // Check if objects need to be recreated (don't exist or older than 20 seconds)
+        bool needsRecreate = false;
+        
+        if (!handle->runloop || !handle->frontend || !handle->map) {
+            needsRecreate = true;
+        } else {
+            auto timeSinceLastUse = std::chrono::duration_cast<std::chrono::seconds>(now - handle->lastUsed).count();
+            if (timeSinceLastUse > CACHE_TIMEOUT_SECONDS) {
+                needsRecreate = true;
+            }
+        }
+        
+        if (needsRecreate) {
+            // Clean up existing objects
+            handle->map.reset();
+            handle->frontend.reset();
+            handle->runloop.reset();
+            
+            // Create fresh objects
+            handle->runloop = std::make_unique<mbgl::util::RunLoop>();
+            
+            handle->frontend = std::make_unique<HeadlessFrontend>(
+                Size{handle->width, handle->height}, 
+                static_cast<float>(handle->pixelRatio)
+            );
+            
+            auto mapTilerConfiguration = TileServerOptions::MapTilerConfiguration();
+            
+            handle->map = std::make_unique<Map>(
+                *handle->frontend,
+                MapObserver::nullObserver(),
+                MapOptions()
+                    .withMapMode(MapMode::Static)
+                    .withSize(handle->frontend->getSize())
+                    .withPixelRatio(static_cast<float>(handle->pixelRatio)),
+                ResourceOptions()
+                    .withTileServerOptions(mapTilerConfiguration)
+            );
+            
+            // Load style
+            handle->map->getStyle().loadJSON(handle->styleJson);
+        }
+        
+        // Update last used time
+        handle->lastUsed = now;
+        
         // Set camera position
         handle->map->jumpTo(CameraOptions()
             .withCenter(LatLng{lat, lon})
@@ -161,11 +183,10 @@ MAPLIBRE_EXPORT const uint8_t* maplibre_get_image(RendererHandle* handle, int* b
 
 MAPLIBRE_EXPORT void maplibre_destroy_renderer(RendererHandle* handle) {
     if (handle) {
-        // Explicit cleanup in correct order
         handle->lastRenderedPng.clear();
         handle->map.reset();
         handle->frontend.reset();
-        handle->runloop.reset(); 
+        handle->runloop.reset();
         handle->isValid = false;
         
         delete handle;
