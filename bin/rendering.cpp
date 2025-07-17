@@ -20,13 +20,9 @@
     #define MAPLIBRE_EXPORT __attribute__((visibility("default")))
 #endif
 
-// Global mutex for RunLoop initialization
-static std::mutex g_init_mutex;
-static bool g_runloop_initialized = false;
-static std::unique_ptr<mbgl::util::RunLoop> g_runloop;
-
 // Renderer handle structure
 struct RendererHandle {
+    std::unique_ptr<mbgl::util::RunLoop> runloop;
     std::unique_ptr<mbgl::HeadlessFrontend> frontend;
     std::unique_ptr<mbgl::Map> map;
     std::vector<uint8_t> lastRenderedPng;
@@ -53,17 +49,12 @@ MAPLIBRE_EXPORT RendererHandle* maplibre_create_renderer(
     try {
         using namespace mbgl;
         
-        // Initialize RunLoop once globally
-        {
-            std::lock_guard<std::mutex> lock(g_init_mutex);
-            if (!g_runloop_initialized) {
-                g_runloop = std::make_unique<util::RunLoop>();
-                g_runloop_initialized = true;
-            }
-        }
+        auto handle = std::make_unique<RendererHandle>();
+
+        // Create run loop 
+        handle->runloop = std::make_unique<mbgl::util::RunLoop>();
         
         // Create renderer handle
-        auto handle = std::make_unique<RendererHandle>();
         handle->width = static_cast<uint32_t>(width);
         handle->height = static_cast<uint32_t>(height);
         handle->pixelRatio = pixel_ratio;
@@ -126,7 +117,10 @@ MAPLIBRE_EXPORT bool maplibre_render_png(
     
     try {
         using namespace mbgl;
-        
+     
+        // Clear previous result
+        handle->lastRenderedPng.clear();
+
         // Set camera position
         handle->map->jumpTo(CameraOptions()
             .withCenter(LatLng{lat, lon})
@@ -171,6 +165,7 @@ MAPLIBRE_EXPORT void maplibre_destroy_renderer(RendererHandle* handle) {
         handle->lastRenderedPng.clear();
         handle->map.reset();
         handle->frontend.reset();
+        handle->runloop.reset(); 
         handle->isValid = false;
         
         delete handle;
