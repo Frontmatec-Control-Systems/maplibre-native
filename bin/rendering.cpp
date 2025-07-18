@@ -129,7 +129,7 @@ MAPLIBRE_EXPORT bool maplibre_render_png(
                 *handle->frontend,
                 MapObserver::nullObserver(),
                 MapOptions()
-                    .withMapMode(MapMode::Static)
+                    .withMapMode(MapMode::Tile)
                     .withSize(handle->frontend->getSize())
                     .withPixelRatio(static_cast<float>(handle->pixelRatio)),
                 ResourceOptions()
